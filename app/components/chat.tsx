@@ -2,12 +2,10 @@
 
 import React, {useState, useEffect, useRef} from "react";
 import styles from "./chat.module.css";
-import {AssistantStream} from "openai/lib/AssistantStream";
 import Markdown from "react-markdown";
-// @ts-expect-error - no types for this yet
-import {AssistantStreamEvent} from "openai/resources/beta/assistants/assistants";
-import {RequiredActionFunctionToolCall} from "openai/resources/beta/threads/runs/runs";
+import rehypeSanitize from "rehype-sanitize";
 import FingerprintJS from '@fingerprintjs/fingerprintjs';
+import { cleanAIOutput } from "../utils/clean";
 
 type MessageRole = "user" | "assistant" | "code";
 
@@ -24,9 +22,18 @@ type Thread = {
     messages: Array<{ role: MessageRole; text: string; }>;
 };
 
+type ToolCall = {
+    id: string;
+    type: string;
+    function: {
+        name: string;
+        arguments: string;
+    };
+};
+
 type ChatProps = {
     functionCallHandler?: (
-        toolCall: RequiredActionFunctionToolCall
+        toolCall: ToolCall
     ) => Promise<string>;
 };
 
@@ -130,48 +137,11 @@ const syncThreadWithBackend = async (thread: Thread, userToken: string) => {
     }
 };
 
-// OpenAI API functions
 const fetchThreadMessages = async (threadId: string, userToken: string) => {
     try {
-        const response = await fetch(`/api/assistants/threads/${threadId}/messages`);
-
-        if (!response.ok) {
-            throw new Error('Failed to fetch thread messages');
-        }
-
-        const data = await response.json();
-
-        // Return null if there are no messages
-        if (!data.data || data.data.length === 0) {
-            return null;
-        }
-
-        // Transform the OpenAI messages into our app's message format
-        const formattedMessages = data.data
-            .sort((a: any, b: any) => a.created_at - b.created_at)
-            .map((message: any) => {
-                const content = message.content[0]?.text?.value || '';
-
-                let role: MessageRole = "assistant";
-                if (message.role === "user") {
-                    role = "user";
-                } else if (message.role === "assistant") {
-                    if (content.includes('```') || content.startsWith('function') || content.startsWith('class')) {
-                        role = "code";
-                    } else {
-                        role = "assistant";
-                    }
-                }
-
-                const cleanText = content.replace(/【.*?】/g, '');
-
-                return {
-                    role,
-                    text: cleanText
-                };
-            });
-
-        return formattedMessages;
+        const messageKey = `${STORAGE_KEYS.CURRENT_THREAD_MESSAGES}_${threadId}`;
+        const stored = localStorage.getItem(messageKey);
+        return stored ? JSON.parse(stored) : null;
     } catch (error) {
         console.error('Error fetching thread messages:', error);
         return null;
@@ -206,8 +176,8 @@ const AssistantMessage = ({text}: { text: string }) => {
                     fill="currentColor"
                     d="M9 15a1 1 0 1 0 1 1a1 1 0 0 0-1-1m-7-1a1 1 0 0 0-1 1v2a1 1 0 0 0 2 0v-2a1 1 0 0 0-1-1m20 0a1 1 0 0 0-1 1v2a1 1 0 0 0 2 0v-2a1 1 0 0 0-1-1m-5-7h-4V5.72A2 2 0 0 0 14 4a2 2 0 0 0-4 0a2 2 0 0 0 1 1.72V7H7a3 3 0 0 0-3 3v9a3 3 0 0 0 3 3h10a3 3 0 0 0 3-3v-9a3 3 0 0 0-3-3m-3.28 2l-.5 2h-2.44l-.5-2ZM18 19a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1h1.22L9 12.24a1 1 0 0 0 1 .76h4a1 1 0 0 0 1-.76L15.78 9H17a1 1 0 0 1 1 1Zm-3-4a1 1 0 1 0 1 1a1 1 0 0 0-1-1"/></svg>
             </span>
-            <div className={styles.assistantMessage}>
-                <Markdown components={{a: LinkRenderer}}>{text}</Markdown>
+            <div className={`${styles.assistantMessage} ${styles.markdownContent}`}>
+                <Markdown rehypePlugins={[[rehypeSanitize]]} components={{a: LinkRenderer}}>{text}</Markdown>
             </div>
         </div>
     );
@@ -365,7 +335,7 @@ const Chat = ({
         if (threads.length > 0 && userToken) {
             localStorage.setItem(`${STORAGE_KEYS.THREADS}_${userToken}`, JSON.stringify(threads));
             threads.forEach(thread => {
-                // syncThreadWithBackend(thread, userToken);
+                syncThreadWithBackend(thread, userToken);
             });
         }
     }, [threads, userToken]);
@@ -385,28 +355,15 @@ const Chat = ({
         if (!userToken) return;
 
         try {
-            const res = await fetch(`/api/assistants/threads`, {
-                method: "POST",
-                headers: {
-                    'Authorization': `Bearer ${userToken}`,
-                    'Content-Type': 'application/json'
-                }
-            });
+            const threadId = crypto.randomUUID();
 
-            if (!res.ok) {
-                throw new Error('Failed to create new thread');
-            }
-
-            const data = await res.json();
-
-            // Initialize with a welcome message instead of fetching messages
             const initialMessage = {
                 role: "assistant" as MessageRole,
                 text: process.env.NEXT_PUBLIC_INITIAL_MESSAGE_TEXT || "👋Welcome! How can I help you today with Needpedia?"
             };
 
             const newThread: Thread = {
-                id: data.threadId,
+                id: threadId,
                 title: "New Chat",
                 lastMessage: initialMessage.text,
                 lastUpdated: new Date().toISOString(),
@@ -422,9 +379,9 @@ const Chat = ({
                 return updatedThreads;
             });
 
-            setCurrentThreadId(data.threadId);
+            setCurrentThreadId(threadId);
             setMessages([initialMessage]);
-            setInputDisabled(false); // Ensure input is enabled for new chat
+            setInputDisabled(false);
         } catch (error) {
             console.error('Error creating new thread:', error);
             setInputDisabled(false);
@@ -455,123 +412,208 @@ const Chat = ({
         }
     };
 
+    const refreshTokens = async () => {
+        const apiUrl = process.env.NEXT_PUBLIC_API_BASE_URL;
+        if (!apiUrl || !userToken) return;
+        try {
+            const fp = await FingerprintJS.load();
+            const result = await fp.get();
+            const res = await fetch(`${apiUrl}/api/v1/tokens`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ fingerprint: result.visitorId, utoken: userToken }),
+            });
+            const data = await res.json();
+            setTokens(data.tokens);
+        } catch (e) {
+            console.error("Failed to refresh tokens:", e);
+        }
+    };
+
     const sendMessage = async (text: string) => {
         if (!userToken || !currentThreadId) return;
+        await doChatCompletion(text);
+    };
+
+    const getApiMessages = (text: string) => {
+        const messageKey = `${STORAGE_KEYS.CURRENT_THREAD_MESSAGES}_${currentThreadId}`;
+        const stored = localStorage.getItem(messageKey);
+        const existingMessages = stored ? JSON.parse(stored) : [];
+        return [
+            ...existingMessages.map(m => ({ role: m.role, content: m.text })),
+            { role: "user" as const, content: text },
+        ];
+    };
+
+    const doChatCompletion = async (text: string) => {
+        const apiMessages = getApiMessages(text);
+        let isFirstContent = true;
+        const toolCallAccumulators: Record<number, any> = {};
 
         try {
-            const response = await fetch(
-                `/api/assistants/threads/${currentThreadId}/messages`,
-                {
-                    method: "POST",
-                    headers: {
-                        'Authorization': `Bearer ${userToken}`,
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify({
-                        content: text,
-                    }),
-                }
-            );
+            const response = await fetch("/api/chat", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ messages: apiMessages }),
+            });
 
             if (!response.ok) {
-                throw new Error('Failed to send message');
+                throw new Error("Chat completion failed");
             }
 
-            // Create a TransformStream to process the data without modifying it
-            const transformStream = new TransformStream({
-                transform(chunk, controller) {
-                    try {
-                        const text = new TextDecoder().decode(chunk);
-                        const data = JSON.parse(text);
+            const reader = response.body!.getReader();
+            const decoder = new TextDecoder();
+            let buffer = "";
 
-                        // Check specifically for message_creation event
-                        if (data.event === 'thread.run.step.completed' &&
-                            data.data?.type === 'message_creation') {
-                            const usage = data.data.usage;
-                            if (usage?.completion_tokens) {
-                                // Store only the completion tokens
-                                (window as any).completionTokens = usage.completion_tokens;
-                            }
-                        }
+            const processChunk = (data: string) => {
+                const parsed = JSON.parse(data);
+                const choice = parsed.choices?.[0];
+                if (!choice) return;
 
-                        // Always forward the chunk to maintain message display
-                        controller.enqueue(chunk);
-                    } catch (error) {
-                        // If there's an error parsing, just forward the chunk
-                        controller.enqueue(chunk);
+                const delta = choice.delta || {};
+
+                if (delta.content) {
+                    if (isFirstContent) {
+                        appendMessage("assistant", delta.content);
+                        isFirstContent = false;
+                    } else {
+                        appendToLastMessage(delta.content);
                     }
                 }
-            });
 
-            // Create a new stream that includes our transform
-            const transformedBody = response.body?.pipeThrough(transformStream);
-            const stream = AssistantStream.fromReadableStream(transformedBody);
-
-            // Handle the end of the stream for token processing
-            stream.on('end', async () => {
-                const completionTokens = (window as any).completionTokens;
-                if (completionTokens > 0) {
-                    try {
-                        const tokenResponse = await fetch(`${process.env.NEXT_PUBLIC_API_BASE_URL}/api/v1/tokens/decrease`, {
-                            method: "POST",
-                            headers: {
-                                'Authorization': `Bearer ${userToken}`,
-                                'Content-Type': 'application/json',
-                            },
-                            body: JSON.stringify({
-                                utoken: userToken,
-                                decrement_by: completionTokens,
-                            }),
-                        });
-
-                        if (!tokenResponse.ok) {
-                            throw new Error('Failed to decrement tokens');
+                if (delta.tool_calls) {
+                    for (const tc of delta.tool_calls) {
+                        const idx = tc.index;
+                        if (!toolCallAccumulators[idx]) {
+                            toolCallAccumulators[idx] = {
+                                id: tc.id || "",
+                                type: tc.type || "function",
+                                function: {
+                                    name: tc.function?.name || "",
+                                    arguments: tc.function?.arguments || "",
+                                },
+                            };
+                        } else if (tc.function?.arguments) {
+                            toolCallAccumulators[idx].function.arguments += tc.function.arguments;
                         }
-
-                        const tokenData = await tokenResponse.json();
-
-                        // Clean up our temporary storage
-                        delete (window as any).completionTokens;
-                    } catch (error) {
-                        console.error('Error updating tokens:', error);
                     }
                 }
-            });
 
-            // Process the stream normally to display messages
-            await handleReadableStream(stream);
+                if (choice.finish_reason === "tool_calls") {
+                    const toolCalls = Object.values(toolCallAccumulators);
+                    handleToolCalls(toolCalls, apiMessages, text);
+                }
 
+                if (choice.finish_reason === "stop") {
+                    setInputDisabled(false);
+                    refreshTokens();
+                }
+            };
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split("\n");
+                buffer = lines.pop() || "";
+
+                for (const line of lines) {
+                    const trimmed = line.trim();
+                    if (!trimmed) continue;
+                    processChunk(trimmed);
+                }
+            }
         } catch (error) {
-            console.error('Error:', error);
-        } finally {
+            console.error("Chat completion error:", error);
             setInputDisabled(false);
         }
     };
-    const submitActionResult = async (runId: string, toolCallOutputs: any[]) => {
+
+    const handleToolCalls = async (toolCalls: any[], currentApiMessages: any[], originalText: string) => {
+        if (!functionCallHandler) {
+            setInputDisabled(false);
+            return;
+        }
+
+        setInputDisabled(true);
+
         try {
-            const response = await fetch(
-                `/api/assistants/threads/${currentThreadId}/actions`,
-                {
-                    method: "POST",
-                    headers: {
-                        "Content-Type": "application/json",
-                        'Authorization': `Bearer ${userToken}`
-                    },
-                    body: JSON.stringify({
-                        runId: runId,
-                        toolCallOutputs: toolCallOutputs,
-                    }),
-                }
+            const toolCallOutputs = await Promise.all(
+                toolCalls.map(async (tc) => {
+                    const result = await functionCallHandler(tc);
+                    return { tool_call_id: tc.id, output: result };
+                })
             );
 
-            if (!response.ok) {
-                throw new Error('Failed to submit action result');
-            }
+            const assistantMsg = {
+                role: "assistant" as const,
+                content: null,
+                tool_calls: toolCalls.map((tc) => ({
+                    id: tc.id,
+                    type: tc.type,
+                    function: tc.function,
+                })),
+            };
 
-            const stream = AssistantStream.fromReadableStream(response.body);
-            handleReadableStream(stream);
+            const toolResultMessages = toolCallOutputs.map((tco) => ({
+                role: "tool" as const,
+                tool_call_id: tco.tool_call_id,
+                content: tco.output,
+            }));
+
+            const newApiMessages = [...currentApiMessages, assistantMsg, ...toolResultMessages];
+
+            const response = await fetch("/api/chat", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ messages: newApiMessages }),
+            });
+
+            if (!response.ok) throw new Error("Tool call follow-up failed");
+
+            const reader = response.body!.getReader();
+            const decoder = new TextDecoder();
+            let buffer = "";
+            let isFirstContent = true;
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split("\n");
+                buffer = lines.pop() || "";
+
+                for (const line of lines) {
+                    const trimmed = line.trim();
+                    if (!trimmed) continue;
+
+                    try {
+                        const parsed = JSON.parse(trimmed);
+                        const choice = parsed.choices?.[0];
+                        if (!choice) continue;
+
+                        if (choice.delta?.content) {
+                            if (isFirstContent) {
+                                appendMessage("assistant", choice.delta.content);
+                                isFirstContent = false;
+                            } else {
+                                appendToLastMessage(choice.delta.content);
+                            }
+                        }
+
+                        if (choice.finish_reason === "stop") {
+                            setInputDisabled(false);
+                            refreshTokens();
+                        }
+                    } catch (e) {
+                        console.error("Error parsing JSON in tool call follow-up:", e);
+                    }
+                }
+            }
         } catch (error) {
-            console.error('Error submitting action result:', error);
+            console.error("Tool call handling error:", error);
             setInputDisabled(false);
         }
     };
@@ -585,45 +627,47 @@ const Chat = ({
         try {
             const apiUrl = process.env.NEXT_PUBLIC_API_BASE_URL;
 
-            // Get the user's fingerprint
-            const fp = await FingerprintJS.load();
-            const result = await fp.get();
-            const fingerprint = result.visitorId;
-            // Send a request to the backend to check the token
-            const response = await fetch(`${apiUrl}/api/v1/tokens`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    fingerprint: fingerprint,
-                    utoken: userToken
-                }),
-            });
+            if (apiUrl) {
+                // Get the user's fingerprint
+                const fp = await FingerprintJS.load();
+                const result = await fp.get();
+                const fingerprint = result.visitorId;
+                // Send a request to the backend to check the token
+                const response = await fetch(`${apiUrl}/api/v1/tokens`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        fingerprint: fingerprint,
+                        utoken: userToken
+                    }),
+                });
 
-            const data = await response.json();
-            setTokens(data.tokens); // Update tokens state
+                const data = await response.json();
+                setTokens(data.tokens); // Update tokens state
 
-            if (data.tokens > 0) {
-                // If tokens are valid, proceed with the normal task
-                sendMessage(userInput);
-                setMessages((prevMessages) => [
-                    ...prevMessages,
-                    { role: 'user', text: userInput },
-                ]);
-                setUserInput('');
-                scrollToBottom();
-            } else {
-                const messageText = `Needpedia Staff: Welcome! This AI is only designed to greet people and answer a few questions. To access our more powerful AI, which has more tokens and can even make posts for you, simply create an account (which is totally free). If you like what you see, feel free to contribute through Patreon [here](https://www.patreon.com/Needpedia).`;
-                setMessages((prevMessages) => [
-                    ...prevMessages,
-                    {
-                        role: 'assistant',
-                        text: messageText,
-                        isHTML: true
-                    }
-                ]);
+                if (data.tokens <= 0) {
+                    const messageText = `Needpedia Staff: Welcome! This AI is only designed to greet people and answer a few questions. To access our more powerful AI, which has more tokens and can even make posts for you, simply create an account (which is totally free). If you like what you see, feel free to contribute through Patreon [here](https://www.patreon.com/Needpedia).`;
+                    setMessages((prevMessages) => [
+                        ...prevMessages,
+                        {
+                            role: 'assistant',
+                            text: messageText,
+                            isHTML: true
+                        }
+                    ]);
+                    return;
+                }
             }
+
+            sendMessage(userInput);
+            setMessages((prevMessages) => [
+                ...prevMessages,
+                { role: 'user', text: userInput },
+            ]);
+            setUserInput('');
+            scrollToBottom();
         } catch (error) {
             console.error('Error checking tokens:', error);
             alert('An error occurred while checking tokens. Please try again.');
@@ -632,64 +676,7 @@ const Chat = ({
         }
     };
 
-    const handleTextCreated = () => {
-        appendMessage("assistant", "");
-    };
 
-    const handleTextDelta = (delta: { value?: string; annotations?: any[] }) => {
-        if (delta.value != null) {
-            appendToLastMessage(delta.value);
-        }
-        if (delta.annotations != null) {
-            annotateLastMessage(delta.annotations);
-        }
-    };
-
-    const handleImageFileDone = (image: { file_id: string }) => {
-        appendToLastMessage(`\n![${image.file_id}](/api/files/${image.file_id})\n`);
-    };
-
-    const toolCallCreated = (toolCall: any) => {
-        if (toolCall.type !== "code_interpreter") return;
-        appendMessage("code", "");
-    };
-
-    const toolCallDelta = (delta: any, snapshot: any) => {
-        if (delta.type !== "code_interpreter") return;
-        if (!delta.code_interpreter?.input) return;
-        appendToLastMessage(delta.code_interpreter.input);
-    };
-    const handleRequiresAction = async (
-        event: AssistantStreamEvent.ThreadRunRequiresAction
-    ) => {
-        const runId = event.data.id;
-        const toolCalls = event.data.required_action.submit_tool_outputs.tool_calls;
-        const toolCallOutputs = await Promise.all(
-            toolCalls.map(async (toolCall) => {
-                const result = await functionCallHandler(toolCall);
-                return {output: result, tool_call_id: toolCall.id};
-            })
-        );
-        setInputDisabled(true);
-        submitActionResult(runId, toolCallOutputs);
-    };
-
-    const handleRunCompleted = () => {
-        setInputDisabled(false);
-    };
-
-    const handleReadableStream = (stream: AssistantStream) => {
-        stream.on("textCreated", handleTextCreated);
-        stream.on("textDelta", handleTextDelta);
-        stream.on("imageFileDone", handleImageFileDone);
-        stream.on("toolCallCreated", toolCallCreated);
-        stream.on("toolCallDelta", toolCallDelta);
-        stream.on("event", (event) => {
-            if (event.event === "thread.run.requires_action")
-                handleRequiresAction(event);
-            if (event.event === "thread.run.completed") handleRunCompleted();
-        });
-    };
 
     const updateThread = (threadId: string, updates: Partial<Thread>) => {
         setThreads(prevThreads => {
@@ -710,9 +697,10 @@ const Chat = ({
     const appendToLastMessage = (text: string) => {
         setMessages((prevMessages) => {
             const lastMessage = prevMessages[prevMessages.length - 1];
+            const combined = cleanAIOutput(lastMessage.text + text);
             const updatedLastMessage = {
                 ...lastMessage,
-                text: lastMessage.text + text,
+                text: combined,
             };
             const newMessages = [...prevMessages.slice(0, -1), updatedLastMessage];
 
@@ -728,7 +716,8 @@ const Chat = ({
 
     const appendMessage = (role: MessageRole, text: string) => {
         setMessages((prevMessages) => {
-            const newMessages = [...prevMessages, {role, text}];
+            const cleaned = role === "assistant" ? cleanAIOutput(text) : text;
+            const newMessages = [...prevMessages, {role, text: cleaned}];
 
             updateThread(currentThreadId, {
                 messages: newMessages,
@@ -737,24 +726,6 @@ const Chat = ({
             });
 
             return newMessages;
-        });
-    };
-
-    const annotateLastMessage = (annotations: any[]) => {
-        setMessages((prevMessages) => {
-            const lastMessage = prevMessages[prevMessages.length - 1];
-            const updatedLastMessage = {
-                ...lastMessage,
-            };
-            annotations.forEach((annotation) => {
-                if (annotation.type === 'file_path') {
-                    updatedLastMessage.text = updatedLastMessage.text.replaceAll(
-                        annotation.text,
-                        `/api/files/${annotation.file_path.file_id}`
-                    );
-                }
-            });
-            return [...prevMessages.slice(0, -1), updatedLastMessage];
         });
     };
 
@@ -865,6 +836,9 @@ const Chat = ({
                                 role="assistant"
                                 text="👋 Welcome! How can I help you today with Needpedia?"
                             />
+                        )}
+                        {inputDisabled && (
+                            <div className={styles.thinking}>...</div>
                         )}
                         <div ref={messagesEndRef}/>
                     </div>
