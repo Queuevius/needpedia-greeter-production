@@ -2,8 +2,6 @@ import { getOpenAIClient } from "@/app/openai";
 
 export const runtime = "nodejs";
 
-let cachedPrompt: string | null = null;
-
 function getPromptUrl(): string {
   const base = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:3000";
   const token = process.env.PROMPT_API_TOKEN || "";
@@ -40,7 +38,6 @@ async function fetchUrlContent(url: string): Promise<string> {
 }
 
 async function getMasterPrompt(): Promise<string> {
-  if (cachedPrompt) return cachedPrompt;
   try {
     const res = await fetch(getPromptUrl());
     const data = await res.json();
@@ -60,8 +57,7 @@ async function getMasterPrompt(): Promise<string> {
       prompt += "\n\n---\nThe following source content is available for reference:\n\n" + sources;
     }
 
-    cachedPrompt = prompt;
-    return cachedPrompt;
+    return prompt;
   } catch (error) {
     console.error("Failed to fetch master prompt:", error);
     return "";
