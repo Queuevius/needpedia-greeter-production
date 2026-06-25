@@ -38,10 +38,16 @@ async function fetchUrlContent(url: string): Promise<string> {
 }
 
 async function getMasterPrompt(): Promise<string> {
+  const aiType = process.env.PROMPT_AI_TYPE || "Florence";
+  console.log(`[Master Prompt] AI Type: ${aiType}`);
+  
   try {
     const res = await fetch(getPromptUrl());
     const data = await res.json();
     let prompt = data.prompt || "";
+    
+    console.log(`[Master Prompt] Present: ${prompt.length > 0 ? "Yes" : "No"}`);
+    console.log(`[Master Prompt] Length: ${prompt.length} characters`);
 
     const urls = extractUrls(prompt);
     if (urls.length > 0) {
@@ -69,6 +75,9 @@ export async function POST(request: Request) {
   const openai = getOpenAIClient();
 
   const masterPrompt = await getMasterPrompt();
+  
+  console.log(`[Chat] Master prompt loaded: ${masterPrompt ? "Yes" : "No"}`);
+  console.log(`[Chat] Messages count: ${messages.length}`);
 
   const fullMessages = masterPrompt
     ? [{ role: "system" as const, content: masterPrompt }, ...messages]
