@@ -16,9 +16,25 @@ function extractUrls(text: string): string[] {
   return Array.from(new Set(matches));
 }
 
+function resolveUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    if (parsed.hash && parsed.hash.length > 1) {
+      const fragment = decodeURIComponent(parsed.hash.slice(1));
+      if (fragment.endsWith(".html") || fragment.endsWith(".md")) {
+        parsed.hash = "";
+        parsed.pathname = "/" + fragment.replace(/^\//, "");
+        return parsed.toString();
+      }
+    }
+  } catch {}
+  return url;
+}
+
 async function fetchUrlContent(url: string): Promise<string> {
   try {
-    const res = await fetch(url, {
+    const resolved = resolveUrl(url);
+    const res = await fetch(resolved, {
       signal: AbortSignal.timeout(8000),
       headers: { "User-Agent": "Needpedia-Greeter/1.0" },
     });
