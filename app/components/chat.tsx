@@ -137,11 +137,67 @@ const syncThreadWithBackend = async (thread: Thread, userToken: string) => {
     }
 };
 
+const persistChatMessages = async (
+    threadId: string,
+    userToken: string,
+    messages: Array<{ role: string; text: string }>,
+    title?: string,
+    lastMessage?: string
+) => {
+    if (!threadId || !userToken || messages.length === 0) return;
+
+    const body: Record<string, unknown> = {
+        thread_id: threadId,
+        assistant_name: "Needpedia Greeter",
+        messages: messages.map(m => ({ role: m.role, content: m.text })),
+    };
+
+    if (title) body.title = title;
+    if (lastMessage) body.last_message = lastMessage;
+
+    try {
+        const apiUrl = process.env.NEXT_PUBLIC_API_BASE_URL;
+        await fetch(`${apiUrl}/api/v1/chat_messages`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': userToken,
+            },
+            body: JSON.stringify(body),
+        });
+    } catch {
+        // Ignore persistence failures
+    }
+};
+
 const fetchThreadMessages = async (threadId: string, userToken: string) => {
     try {
         const messageKey = `${STORAGE_KEYS.CURRENT_THREAD_MESSAGES}_${threadId}`;
         const stored = localStorage.getItem(messageKey);
-        return stored ? JSON.parse(stored) : null;
+        if (stored) return JSON.parse(stored);
+
+        const apiUrl = process.env.NEXT_PUBLIC_API_BASE_URL;
+        if (!apiUrl) return null;
+
+        const response = await fetch(`${apiUrl}/api/v1/chat_messages?thread_id=${encodeURIComponent(threadId)}`, {
+            headers: {
+                'Authorization': userToken,
+                'Content-Type': 'application/json'
+            }
+        });
+
+        if (!response.ok) return null;
+
+        const data = await response.json();
+        if (!data.messages || data.messages.length === 0) return null;
+
+        const mapped = data.messages.map((m: { role: string; content: string }) => ({
+            role: m.role === "tool" ? "code" as const : m.role as MessageRole,
+            text: m.content
+        }));
+
+        localStorage.setItem(messageKey, JSON.stringify(mapped));
+        return mapped;
     } catch (error) {
         console.error('Error fetching thread messages:', error);
         return null;
@@ -507,6 +563,11 @@ const Chat = ({
                 if (choice.finish_reason === "stop") {
                     setInputDisabled(false);
                     refreshTokens();
+                    // Persist messages to Rails backend
+                    persistChatMessages(currentThreadId, userToken, [
+                        ...apiMessages.map(m => ({ role: m.role, text: m.content })),
+                        { role: "assistant", text: messages[messages.length - 1]?.text || "" }
+                    ]);
                 }
             };
 
@@ -606,6 +667,8 @@ const Chat = ({
                         if (choice.finish_reason === "stop") {
                             setInputDisabled(false);
                             refreshTokens();
+                            // Persist messages to Rails backend after tool call follow-up
+                            persistChatMessages(currentThreadId, userToken, messages.map(m => ({ role: m.role, text: m.text })));
                         }
                     } catch (e) {
                         console.error("Error parsing JSON in tool call follow-up:", e);
@@ -844,6 +907,7 @@ const Chat = ({
                     </div>
 
                     <form onSubmit={handleSubmit} className={styles.inputForm}>
+                        <div className={styles.inputRow}>
                         <textarea
                             className={styles.input}
                             value={userInput}
@@ -851,7 +915,6 @@ const Chat = ({
                             onKeyDown={(e) => {
                                 if (e.key === 'Enter' && !e.shiftKey) {
                                     e.preventDefault();
-                                    handleSubmit(e);
                                 }
                             }}
                             placeholder="Type your message here..."
@@ -880,7 +943,9 @@ const Chat = ({
                                 />
                             </svg>
                         </button>
+                        </div>
                     </form>
+                    <p className={styles.disclaimer}>All AI conversations are recorded to help us improve our site and workflows.</p>
                 </div>
             </div>
         </div>
