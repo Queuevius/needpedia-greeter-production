@@ -160,17 +160,24 @@
 
 .inputForm {
     display: flex;
-    align-items: center;
-    background-color: #E9ECEF; /* Light input background */
+    flex-direction: column;
+    gap: 4px;
+    background-color: #E9ECEF;
     border-radius: 0.75rem;
     padding: 0.5rem;
+}
+
+.inputRow {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
 }
 
 .input {
     flex: 1;
     background-color: transparent;
     border: none;
-    color: #343A40; /* Dark gray text */
+    color: #343A40;
     padding: 0.5rem;
     font-size: 0.875rem;
 }
@@ -489,4 +496,13 @@
 @keyframes pulse {
     0%, 100% { opacity: 0.3; }
     50% { opacity: 1; }
+}
+
+.disclaimer {
+    text-align: center;
+    font-size: 11px;
+    color: #999;
+    padding: 6px 16px;
+    margin: 0;
+    line-height: 1.4;
 }
